@@ -6,9 +6,10 @@ always on top, transparent background, zero taskbar presence, click-through.
 
 States:
   - hidden    : dot invisible (Jarvis in silent standby)
-  - listening : orange pulsing dot  (mic is active)
+  - listening : orange pulsing dot  (mic is active / hotkey triggered)
   - thinking  : cyan pulsing dot    (Groq + Gemini processing)
   - speaking  : green steady dot    (Edge-TTS audio playing)
+  - followup  : yellow slow pulse   (waiting for wake phrase after response)
 """
 
 import threading
@@ -22,9 +23,11 @@ import time
 # ──────────────────────────────────────────────────────────────
 STATE_COLORS = {
     "hidden":    None,           # dot invisible
+    "standby":   "#0A84FF",      # iOS blue    (standby passive ear open)
     "listening": "#FF9500",      # iOS orange  (mic active)
     "thinking":  "#00D4FF",      # cyan        (processing)
     "speaking":  "#34C759",      # iOS green   (TTS playing)
+    "followup":  "#FFD60A",      # yellow      (waiting for wake phrase)
 }
 
 DOT_SIZE      = 18          # diameter of the dot in pixels
@@ -129,8 +132,20 @@ class JarvisOverlay:
         elif state == "speaking":
             # Steady glow — no pulse
             self._canvas.itemconfig(self._dot_id, fill=color, outline=color)
+        elif state == "standby":
+            # Very calm, subtle breathing pulse for standby
+            lo, hi = (0.35, 0.90)
+            alpha = lo + (hi - lo) * (0.5 + 0.5 * math.sin(tick * math.pi * 0.7))
+            blended = self._blend(color, alpha)
+            self._canvas.itemconfig(self._dot_id, fill=blended, outline=blended)
+        elif state == "followup":
+            # Slow, gentle pulse (half speed) — waiting for wake phrase
+            lo, hi = PULSE_RANGE
+            alpha = lo + (hi - lo) * (0.5 + 0.5 * math.sin(tick * math.pi))
+            blended = self._blend(color, alpha)
+            self._canvas.itemconfig(self._dot_id, fill=blended, outline=blended)
         else:
-            # Smooth sine pulse between PULSE_RANGE opacities
+            # Smooth fast sine pulse — listening / thinking
             lo, hi = PULSE_RANGE
             alpha = lo + (hi - lo) * (0.5 + 0.5 * math.sin(tick * math.pi * 2))
             blended = self._blend(color, alpha)

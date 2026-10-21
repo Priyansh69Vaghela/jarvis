@@ -157,72 +157,75 @@ def render_stack_table(answer_stack):
     console.print(table)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Hotkey-triggered voice session (runs in background thread)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_hotkey_session(stt: SpeechRecognizer, brain: JarvisBrain,
-                       executor_pool: concurrent.futures.ThreadPoolExecutor,
-                       overlay: JarvisOverlay):
+def run_voice_turn(stt: SpeechRecognizer, brain: JarvisBrain,
+                   executor_pool: concurrent.futures.ThreadPoolExecutor,
+                   overlay: JarvisOverlay,
+                   initial_query: str = ""):
     """
-    A complete single-turn voice session triggered by the global hotkey.
-    Runs in a background thread so the console loop is not blocked.
+    Unified voice turn for Jarvis, triggered by:
+    1) Background voice wake phrase ("Hey Jarvis", "Hello Jarvis", "Listen Jarvis", etc.)
+    2) Global hotkey (Home / Fn+Home)
+    Executes one full conversation turn, speaks the response,
+    and returns cleanly to standby mode.
     """
-    # ── Wake cue ─────────────────────────────────────────────
-    overlay.set_state("listening")
-    if JARVIS_WAKE_SOUND:
-        speak("Listening, sir.")
+    query = initial_query.strip() if initial_query else ""
 
-    # ── Capture first query ───────────────────────────────────
-    console.print("[bold red]🔴 [Hotkey] Listening... (speak now)[/bold red]")
-    audio_data = stt.record_until_silence(
-        silence_duration=JARVIS_SILENCE_TIMEOUT,
-        initial_timeout=6.0
-    )
+    if not query:
+        # Triggered by hotkey or standalone wake phrase without query
+        overlay.set_state("listening")
+        if JARVIS_WAKE_SOUND:
+            speak("Listening, sir.")
 
-    if audio_data is None:
-        console.print("[dim]No speech detected via hotkey.[/dim]")
-        overlay.set_state("hidden")
+        console.print("[bold red]🔴 [Jarvis Active] Listening... (speak now)[/bold red]")
+        audio_data = stt.record_until_silence(
+            silence_duration=JARVIS_SILENCE_TIMEOUT,
+            initial_timeout=6.0,
+        )
+
+        if audio_data is None:
+            console.print("[dim]No speech detected. Standing by.[/dim]")
+            overlay.set_state("standby")
+            return
+
+        overlay.set_state("thinking")
+        console.print("[dim]⚡ Transcribing via Groq Whisper...[/dim]")
+        query = stt.transcribe(audio_data).strip()
+
+    if not query:
+        console.print("[dim]Could not recognise speech. Standing by.[/dim]")
+        overlay.set_state("standby")
         return
 
-    overlay.set_state("thinking")
-    console.print("[dim]⚡ Transcribing via Groq Whisper...[/dim]")
-    first_query = stt.transcribe(audio_data).strip()
-
-    if not first_query:
-        console.print("[dim]Could not recognise speech. Try again.[/dim]")
-        overlay.set_state("hidden")
-        return
-
-    if is_termination_command(first_query):
-        console.print(f"[bold green]You (Hotkey):[/bold green] {first_query}")
+    # Check for termination command
+    if is_termination_command(query):
+        console.print(f"[bold green]You:[/bold green] {query}")
         msg = "Terminating systems. Have a productive day, sir."
         console.print(f"[bold cyan]Jarvis:[/bold cyan] {msg}")
         overlay.set_state("speaking")
         speak(msg)
         overlay.set_state("hidden")
-        # Signal main loop to exit
         os._exit(0)
-        return
 
-    console.print(f"\n[bold green]▶ Hotkey Query:[/bold green] \"{first_query}\"")
+    console.print(f"\n[bold green]▶ You:[/bold green] \"{query}\"")
+    overlay.set_state("thinking")
 
-    # ── Dispatch background reasoning immediately ─────────────
-    fut = executor_pool.submit(brain.think, first_query)
-    answer_stack = [{"index": 0, "query": first_query, "future": fut, "start_time": time.time()}]
-    render_stack_table(answer_stack)
-
-    # ── Wait for reasoning ────────────────────────────────────
-    console.print("[dim]Finalizing answer...[/dim]")
+    # Fast dispatch to Gemini AI Brain
+    fut = executor_pool.submit(brain.think, query)
     ans = fut.result()
 
-    # ── Deliver answer aloud ──────────────────────────────────
+    # Speak response
     overlay.set_state("speaking")
     console.print(f"[bold cyan]Jarvis:[/bold cyan] {ans}\n")
     speak(ans)
 
-    # ── Return to standby ────────────────────────────────────
-    overlay.set_state("hidden")
+    # Audio bleed guard: wait 1.0s after speaking finishes so mic never hears TTS reverberation
+    time.sleep(1.0)
+
+    # Return cleanly to standby
+    overlay.set_state("standby")
+    console.print("[dim]💤 Standby mode active. Say 'Hey Jarvis' or press Fn+Home anytime.[/dim]")
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,35 +258,68 @@ def run_phase1():
     # ── Start iOS-style overlay dot ───────────────────────────
     overlay = JarvisOverlay()
     overlay.start()
+    overlay.set_state("standby")
 
-    # ── Register global hotkey ────────────────────────────────
-    def _hotkey_callback():
-        """Runs in a daemon thread when Fn+Home (or configured key) is pressed."""
-        t = threading.Thread(
-            target=run_hotkey_session,
-            args=(stt, brain, executor_pool, overlay),
+    # ── Session-level busy guard (prevents duplicate triggers) ───────────────
+    _session_busy = threading.Event()
+    _running = threading.Event()
+    _running.set()
+
+    def _trigger_session(initial_query: str = ""):
+        """Trigger a Jarvis voice turn safely from hotkey or voice wake word."""
+        if _session_busy.is_set():
+            return
+        _session_busy.set()
+
+        def _session_wrapper():
+            try:
+                run_voice_turn(stt, brain, executor_pool, overlay, initial_query=initial_query)
+            finally:
+                _session_busy.clear()
+
+        threading.Thread(
+            target=_session_wrapper,
             daemon=True,
-            name="JarvisHotkeySession"
-        )
-        t.start()
+            name="JarvisSession"
+        ).start()
 
+    # 1. Global hotkey trigger (Fn+Home / Home)
     hotkey_mgr = GlobalHotkeyManager(
         hotkey_str=JARVIS_HOTKEY,
-        callback=_hotkey_callback
+        callback=lambda: _trigger_session(initial_query="")
     )
     hotkey_mgr.start()
 
+    # 2. Standby passive voice wake-word listener (Hey Jarvis, Hello Jarvis, etc.)
+    def _standby_listener_worker():
+        while _running.is_set():
+            if _session_busy.is_set():
+                time.sleep(0.3)
+                continue
+            is_wake, query = stt.listen_for_wake_phrase(is_busy_fn=_session_busy.is_set)
+            if is_wake and not _session_busy.is_set():
+                console.print(f"[bold cyan]⚡ Wake word detected:[/bold cyan] [green]'{query or 'Wake phrase'}'[/green]")
+                _trigger_session(initial_query=query)
+
+    standby_thread = threading.Thread(
+        target=_standby_listener_worker,
+        daemon=True,
+        name="JarvisStandbyListener"
+    )
+    standby_thread.start()
+
     # ── Greeting ─────────────────────────────────────────────
-    greeting = "Jarvis online and ready, sir. Stack execution pipeline active. How may I assist you?"
+    greeting = "Jarvis online and ready, sir. Standby listening active. How may I assist you?"
     console.print(f"[bold cyan]Jarvis:[/bold cyan] {greeting}")
     speak(greeting)
+    overlay.set_state("standby")
 
     console.print(
         "\n[bold green]Commands:[/bold green] [dim]Type '/text' for text-only, '/voice' for mic mode, "
         "'/reset' to clear memory, 'exit' to quit.[/dim]"
     )
     console.print(
-        f"[bold yellow]🟠 Hotkey:[/bold yellow] [dim]Press [bold]{JARVIS_HOTKEY.upper()}[/bold] "
+        f"[bold yellow]🟠 Activation:[/bold yellow] [dim]Say [bold]'Hey Jarvis'[/bold] or press [bold]{JARVIS_HOTKEY.upper()}[/bold] "
         "anytime (from any app) to speak to Jarvis.[/dim]\n"
     )
 
@@ -327,7 +363,7 @@ def run_phase1():
                         continue
 
                     overlay.set_state("thinking")
-                    console.print("[dim]⚡ Transcribing via Groq Whisper...[/dim]")
+                    console.print("[dim]-- Transcribing via Groq Whisper...[/dim]")
                     first_query = stt.transcribe(audio_data).strip()
 
                     if not first_query:
@@ -348,7 +384,7 @@ def run_phase1():
                     fut0 = executor_pool.submit(brain.think, first_query)
                     answer_stack = [{"index": 0, "query": first_query, "future": fut0, "start_time": time.time()}]
 
-                    console.print(f"\n[bold green]▶ Stack [Index 0]:[/bold green] \"{first_query}\"")
+                    console.print(f"\n[bold green]> Stack [Index 0]:[/bold green] \"{first_query}\"")
                     render_stack_table(answer_stack)
 
                     # Pipelined Stack Continuation Loop
@@ -358,7 +394,7 @@ def run_phase1():
                         speak(followup_prompt)
 
                         next_idx = len(answer_stack)
-                        console.print(f"[dim]🎤 Listening... (Speak for Index {next_idx}, say 'proceed' / 'give output', or stay quiet)[/dim]")
+                        console.print(f"[dim]--*_*-- Listening... (Speak for Index {next_idx}, say 'proceed' / 'give output', or stay quiet)[/dim]")
 
                         overlay.set_state("listening")
                         followup_audio = stt.record_until_silence(silence_duration=1.8, initial_timeout=3.5)
@@ -444,16 +480,17 @@ def run_phase1():
                     console.print(f"[bold cyan]Jarvis [{label} — \"{q}\"]:[/bold cyan] {ans}\n")
                     speak(f"For {label}: {ans}")
 
-            overlay.set_state("hidden")
+            overlay.set_state("standby")
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Session interrupted.[/yellow]")
             break
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {e}")
-            overlay.set_state("hidden")
+            overlay.set_state("standby")
 
     # Cleanup
+    _running.clear()
     hotkey_mgr.stop()
     overlay.stop()
 

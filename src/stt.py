@@ -7,11 +7,93 @@ import sounddevice as sd
 from groq import Groq
 from src.config import GROQ_API_KEY, GROQ_WHISPER_MODEL, SAMPLE_RATE, CHANNELS
 
+import re
+
+def parse_wake_phrase(text: str):
+    """
+    Checks if text contains a Jarvis wake command.
+    Returns (is_wake: bool, remaining_query: str).
+    """
+    t = text.strip()
+    if not t:
+        return False, ""
+    
+    # 1. Matches "hey jarvis", "hello jarvis", "listen jarvis", "ok jarvis", "hi jarvis", or "jarvis"
+    m = re.match(r'^(?:hey|hello|hi|listen|ok|okay)?\s*\bjarvis[\s,:\.!?]*(.*)$', t, re.IGNORECASE)
+    if m:
+        return True, m.group(1).strip()
+    
+    # 2. Check if jarvis is mentioned anywhere in the utterance
+    if re.search(r'\bjarvis\b', t, re.IGNORECASE):
+        cleaned = re.sub(r'\b(?:hey|hello|hi|listen|ok|okay)?\s*\bjarvis\b[\s,:\.!?]*', '', t, flags=re.IGNORECASE).strip()
+        return True, cleaned
+        
+    return False, ""
+
 class SpeechRecognizer:
     def __init__(self):
         self.client = None
         if GROQ_API_KEY:
             self.client = Groq(api_key=GROQ_API_KEY)
+
+    def listen_for_wake_phrase(self, is_busy_fn, silence_threshold=0.018):
+        """
+        Passive background ear for Standby mode.
+        Monitors microphone without blocking. When volume exceeds silence_threshold,
+        captures the speech segment, transcribes, and checks for a Jarvis wake phrase.
+        Returns (is_wake: bool, remaining_query: str).
+        """
+        chunk_duration = 0.1
+        chunk_samples = int(SAMPLE_RATE * chunk_duration)
+        audio_chunks = []
+        started_talking = False
+        silence_start_time = None
+        start_time = time.time()
+
+        try:
+            with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype='float32') as stream:
+                while True:
+                    if is_busy_fn():
+                        return False, ""
+                    
+                    data, _ = stream.read(chunk_samples)
+                    volume = np.linalg.norm(data) / np.sqrt(len(data))
+
+                    if volume > silence_threshold:
+                        if not started_talking:
+                            started_talking = True
+                            start_time = time.time()
+                        silence_start_time = None
+                        audio_chunks.append(data)
+                    elif started_talking:
+                        audio_chunks.append(data)
+                        if silence_start_time is None:
+                            silence_start_time = time.time()
+                        elif time.time() - silence_start_time > 1.0:
+                            # 1.0s of silence after speech -> user finished speaking
+                            break
+                    else:
+                        time.sleep(0.02)
+                        # After 2.0s of pure silence, cycle so caller can check busy flag
+                        if time.time() - start_time > 2.0:
+                            return False, ""
+
+                    if started_talking and (time.time() - start_time > 4.5):
+                        break
+
+            if not audio_chunks or is_busy_fn():
+                return False, ""
+
+            audio_data = np.concatenate(audio_chunks, axis=0)
+            transcription = self.transcribe(audio_data).strip()
+            if not transcription or is_busy_fn():
+                return False, ""
+
+            return parse_wake_phrase(transcription)
+
+        except Exception:
+            time.sleep(0.3)
+            return False, ""
 
     def record_until_silence(self, silence_threshold=0.015, silence_duration=2.2, max_duration=30.0, initial_timeout=5.0):
         """

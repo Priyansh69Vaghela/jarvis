@@ -29,7 +29,7 @@ JARVIS_WAKE_SOUND = os.getenv("JARVIS_WAKE_SOUND", "true").lower() == "true"
 JARVIS_SILENCE_TIMEOUT = float(os.getenv("JARVIS_SILENCE_TIMEOUT", "2.0"))
 
 # AI Brain settings
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 
 # Audio recording settings

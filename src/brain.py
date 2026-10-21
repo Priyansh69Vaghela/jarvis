@@ -20,7 +20,7 @@ class JarvisBrain:
         
         # Priority list of models to try if one is busy (503) or hits quota limits (429)
         self.models_to_try = []
-        for m in [GEMINI_MODEL, "gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-lite-latest", "gemini-flash-latest"]:
+        for m in [GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-flash-latest"]:
             if m and m not in self.models_to_try:
                 self.models_to_try.append(m)
 
