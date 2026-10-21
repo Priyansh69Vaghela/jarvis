@@ -18,6 +18,16 @@ JARVIS_VOICE = os.getenv("JARVIS_VOICE", "en-US-ChristopherNeural")
 JARVIS_VOICE_RATE = os.getenv("JARVIS_VOICE_RATE", "+5%")
 JARVIS_VOICE_PITCH = os.getenv("JARVIS_VOICE_PITCH", "+0Hz")
 
+# Background hotkey activation settings
+# Options: 'home', 'ctrl+home', 'alt+home', 'alt+j'
+# Strip inline comments (e.g. JARVIS_HOTKEY=home  # comment) and whitespace
+_raw_hotkey = os.getenv("JARVIS_HOTKEY", "home")
+JARVIS_HOTKEY = _raw_hotkey.split("#")[0].strip().lower()
+# Whether to say "Listening, sir" aloud when hotkey fires
+JARVIS_WAKE_SOUND = os.getenv("JARVIS_WAKE_SOUND", "true").lower() == "true"
+# Seconds of silence after your voice before Jarvis processes the command
+JARVIS_SILENCE_TIMEOUT = float(os.getenv("JARVIS_SILENCE_TIMEOUT", "2.0"))
+
 # AI Brain settings
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
